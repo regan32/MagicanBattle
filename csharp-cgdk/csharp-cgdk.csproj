@@ -62,6 +62,7 @@
     <Reference Include="System.Core">
       <RequiredTargetFramework>3.5</RequiredTargetFramework>
     </Reference>
+    <Reference Include="System.Drawing" />
     <Reference Include="System.Xml.Linq">
       <RequiredTargetFramework>3.5</RequiredTargetFramework>
     </Reference>
@@ -72,6 +73,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="DebugHelper.cs" />
     <Compile Include="Model\ActionType.cs" />
     <Compile Include="Model\Bonus.cs" />
     <Compile Include="Model\BonusType.cs" />

@@ -18,80 +18,143 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             Retreed = 16,
             MovingToBonus = 32,
             WaitingForCreeps = 64,
-            Unstucking = 128,
+            Attacking = 128,
+            SelectGoal = 256,
         }
 
+        private enum Goals
+        {
+            PushMid,
+            PushBottom,
+            PushTop,
+            PushBase,
+            Heal,
+            TakeTopBonus,
+            TakeBottomBonus,
+
+        }
+
+        private Dictionary<Goals, Point2D> targetToPoint = new Dictionary<Goals, Point2D>();
         private bool initialized = false;
         private static double WAYPOINT_RADIUS = 100.0D;
-        private readonly Dictionary<LaneType, Point2D[]> waypointsByLane = new Dictionary<LaneType, Point2D[]>();
         private Random random;
 
-        private Point2D globalGoal;
+        private Goals globalGoal;
         private Queue<Point2D> pathToGoal;
-        private Queue<Wizard> lastWizardStates = new Queue<Wizard>();
+        private Queue<Wizard> lastWizardGameStates = new Queue<Wizard>();
         private Queue<Point2D> unstuckQueue = new Queue<Point2D>(); 
         private List<LivingUnit> enemiesInRange;
         private List<LivingUnit> blockers;
         private List<Point2D> globalWaypoints;
         private double[,] roadMap;
-        private int lastSavedTick = 0;
         private int localMapSize;
-        private double localMapWizardPosition;
+        private int localMapCentre;
 
         public void Move(Wizard self, World world, Game game, Move move)
         {
             InitializeConstants(self, game);
             InitializeUnits(self, world, game);
+            globalGoal = SelectMagicanGoal(self, world, game);
             var state = GetMagicanState(self, world, game);
-            Console.WriteLine(state);
 
-            if ((state & State.Unstucking) != 0)
-            {
-                GoForward(self, game, move, this.unstuckQueue.Dequeue());
-                state &= State.Stuck;
-            }
             if (state.HasFlag(State.Retreed) || state.HasFlag(State.WaitingForCreeps))
             {
-                Console.WriteLine("RETREED!!!");
-                GoForward(self, game, move, GetNextwayPointInGraph(self, GetPreviousWaypoint(self)));
+                globalGoal = Goals.Heal;
+                GoTo(self, game, move, GetNextwayPoint(self));
                 state &= State.Stuck;
             }
 
-            if (state.HasFlag(State.Attacked))
+            if (state.HasFlag(State.MovingToBonus) &&
+                (globalGoal == Goals.TakeBottomBonus || globalGoal == Goals.TakeTopBonus))
             {
-                Console.WriteLine("Attacked!");
-                //GoBackward(self, game, move, GetPreviousWaypoint(self));
-                //state &= State.Stuck;
+                GoTo(self, game, move, GetNextwayPoint(self));
+                state &= State.Stuck;
             }
 
-            if (state.HasFlag(State.Moving))
-            {
-                Console.WriteLine("Moving to target");
-                GoForward(self, game, move, GetNextwayPointInGraph(self,GetNextWaypoint(self)));
-                state &= State.EnemiesInSight;
-            }
             if (state.HasFlag(State.EnemiesInSight) && AttackEnemy(self, game, move))
             {
+                //TODO move to attacking position
+                lastWizardGameStates.Clear();
                 state = 0;
+            }
+            else
+            {
+                GoTo(self, game, move, GetNextwayPoint(self));
+                state &= State.Stuck;
             }
 
             if (state.HasFlag(State.Stuck))
             {
-                Console.WriteLine("Trying Unstack");
+                Console.WriteLine("Stuck");
                 TryUnstuck(move, self, game, world);
             }
 
-//            ChooseTarget(self, world, game, move);
-//            var skills = self.Skills.ToList();
-
-
-            if (this.lastWizardStates.Count >= 100)
+            if (this.lastWizardGameStates.Count >= 5)
             {
-                this.lastWizardStates.Dequeue();
+                this.lastWizardGameStates.Dequeue();
             }
 
-            this.lastWizardStates.Enqueue(self);
+            this.lastWizardGameStates.Enqueue(self);
 
+        }
+
+        private Goals SelectMagicanGoal(Wizard self, World world, Game game)
+        {
+            if(self.Life* 2 < self.MaxLife)
+                return Goals.Heal;
+
+            if (world.TickIndex < 18000 || world.Bonuses.Any())
+            {
+                var ticks = world.TickIndex;
+                while (ticks > 2500)
+                {
+                    ticks -= 2500;
+                }
+
+                var ticksToBonus = 2500 - ticks;
+                var distanseToTop = targetToPoint[Goals.TakeTopBonus].GetDistanceTo(self);
+                var distanseToBottom = targetToPoint[Goals.TakeBottomBonus].GetDistanceTo(self);
+
+                if (ticksToBonus < 500)
+                {
+                    var closestBonus = Math.Min(distanseToBottom, distanseToTop);
+                    if(game.WizardStrafeSpeed * ticksToBonus < closestBonus)
+                        return closestBonus == distanseToTop 
+                            ? Goals.TakeTopBonus 
+                            : Goals.TakeBottomBonus;
+                }
+                else
+                {
+                    var bonus = world.Bonuses.OrderBy(a => a.GetDistanceTo(self)).FirstOrDefault(a => a.GetDistanceTo(self) < 1500);
+                    if(bonus != null)
+                    {
+                        return (int)bonus.X == 2800 ? Goals.TakeBottomBonus : Goals.TakeTopBonus;
+                    }
+                }
+            }
+            
+            var closestTower =world.Buildings.Where(a => a.Faction != self.Faction && a.Type == BuildingType.GuardianTower).OrderBy(a => a.GetDistanceTo(self)).FirstOrDefault();
+
+            if (closestTower == null)
+            {
+                return Goals.PushBase;
+            }
+            else
+            {
+//                var mid = targetToPoint[Goals.PushMid].GetDistanceTo(closestTower);
+//                var top = targetToPoint[Goals.PushTop].GetDistanceTo(closestTower);
+//                var bottom = targetToPoint[Goals.PushBottom].GetDistanceTo(closestTower);
+//
+//                if(mid <= top && mid <= bottom)
+//                    return Goals.PushMid;
+//
+//                if(top <= bottom && top <= mid)
+//                    return Goals.PushTop;
+//
+//                return Goals.PushTop;
+
+                return Goals.PushMid;
+            }
         }
 
         private bool AttackEnemy(Wizard self, Game game, Move move)
@@ -108,111 +171,45 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             }
             return false;
         }
-        private void GoBackward(Wizard self, Game game, Move move, Point2D point)
+
+        private void GoTo(Wizard self, Game game, Move move, Point2D point)
         {
             var distanseToTarget = point.GetDistanceTo(self);
-            move.Speed = distanseToTarget >= game.WizardForwardSpeed ? -game.WizardForwardSpeed : -distanseToTarget;
-            move.Turn = Math.PI/2 - self.GetAngleTo(point.X, point.Y);
-        }
-        private void GoForward(Wizard self, Game game, Move move, Point2D point)
-        {
-            var distanseToTarget = point.GetDistanceTo(self);
-            if (this.unstuckQueue.Any() && self.GetAngleTo(point.X, point.Y) > Math.PI / 2 - self.GetAngleTo(point.X, point.Y))
+            var angle = self.GetAngleTo(point.X, point.Y);
+
+            if (angle >= Math.PI / 6)
             {
-                GoBackward(self, game, move, point);
+                move.StrafeSpeed = distanseToTarget >= game.WizardStrafeSpeed ? game.WizardStrafeSpeed : distanseToTarget;
             }
-            else
+            if (angle <= -Math.PI / 6)
+            {
+                move.StrafeSpeed = distanseToTarget >= game.WizardStrafeSpeed ? -game.WizardStrafeSpeed : -distanseToTarget;
+            }
+//            if (angle <= -Math.PI/2 || angle >= Math.PI/2)
+//            {
+//                move.Speed = distanseToTarget >= game.WizardForwardSpeed ? -game.WizardForwardSpeed : -distanseToTarget;
+//            }
+            
+            if(angle >= -Math.PI/6 && angle <= Math.PI/6)
             {
                 move.Speed = distanseToTarget >= game.WizardForwardSpeed ? game.WizardForwardSpeed : distanseToTarget;
-                move.Turn = self.GetAngleTo(point.X, point.Y);
             }
+
+            move.Turn = angle;
         }
 
         private void PutUnitsOnMap(LivingUnit unit, Wizard self, bool[,] image)
         {
-            int centerX = (int)Math.Round(localMapWizardPosition + unit.X - self.X);
-            int centerY = (int)Math.Round(localMapWizardPosition + unit.Y - self.Y);
-            int radius = (int)unit.Radius + (int)self.Radius;
+            int centerX = (int)Math.Round(localMapCentre + unit.X - self.X);
+            int centerY = (int)Math.Round(localMapCentre + unit.Y - self.Y);
+            int radius = (int) Math.Round(unit.Radius) + (int) Math.Round(self.Radius) + 1;
 
-            int d = (5 - radius * 4) / 4;
-            int x = 0;
-            int y = radius;
-            
-            do
-            {
-                // ensure index is in range before setting (depends on your image implementation)
-                // in this case we check if the pixel location is within the bounds of the image before setting the pixel
-                            
-                if (centerX + x >= 0 && centerX + x <= localMapSize - 1 && centerY + y >= 0 && centerY + y <= localMapSize - 1)
-                    image[centerX + x, centerY + y] = true;
-                if (centerX + x >= 0 && centerX + x <= localMapSize - 1 && centerY - y >= 0 && centerY - y <= localMapSize - 1)
-                    image[centerX + x, centerY - y] = true;
-                if (centerX - x >= 0 && centerX - x <= localMapSize - 1 && centerY + y >= 0 && centerY + y <= localMapSize - 1)
-                    image[centerX - x, centerY + y] = true;
-                if (centerX - x >= 0 && centerX - x <= localMapSize - 1 && centerY - y >= 0 && centerY - y <= localMapSize - 1)
-                    image[centerX - x, centerY - y] = true;
-                if (centerX + y >= 0 && centerX + y <= localMapSize - 1 && centerY + x >= 0 && centerY + x <= localMapSize - 1)
-                    image[centerX + y, centerY + x] = true;
-                if (centerX + y >= 0 && centerX + y <= localMapSize - 1 && centerY - x >= 0 && centerY - x <= localMapSize - 1)
-                    image[centerX + y, centerY - x] = true;
-                if (centerX - y >= 0 && centerX - y <= localMapSize - 1 && centerY + x >= 0 && centerY + x <= localMapSize - 1)
-                    image[centerX - y, centerY + x] = true;
-                if (centerX - y >= 0 && centerX - y <= localMapSize - 1 && centerY - x >= 0 && centerY - x <= localMapSize - 1)
-                    image[centerX - y, centerY - x] = true;
-                if (d < 0)
-                {
-                    d += 2 * x + 1;
-                }
-                else
-                {
-                    d += 2 * (x - y) + 1;
-                    y--;
-                }
-                x++;
-            } while (x <= y);
-
-//            int error = -radius;
-//            int x = radius;
-//            int y = 0;
-//
-//            while (x >= y)
-//            {
-//                int lastY = y;
-//
-//                error += y;
-//                ++y;
-//                error += y;
-//
-//                plot4points(image, centerX, centerY, x, lastY);
-//
-//                if (error >= 0)
-//                {
-//                    if (x != lastY)
-//                        plot4points(image, centerX, centerY, lastY, x);
-//
-//                    error -= x;
-//                    --x;
-//                    error -= x;
-//                }
-//            }
-        }
-
-        void plot4points(bool[,] buffer, int cx, int cy, int x, int y)
-        {
-            horizontalLine(buffer, cx - x, cy + y, cx + x);
-            if (x != 0 && y != 0)
-                horizontalLine(buffer, cx - x, cy - y, cx + x);
-        }
-        void setPixel(bool[,] buffer, int x, int y)
-        {
-            buffer[y, x] = true;
-        }
-
-        void horizontalLine(bool[,] buffer, int x0, int y0, int x1)
-        {
-            for (int x = x0; x <= x1; ++x)
-                if(x >=0 && x < this.localMapSize && y0 >= 0 && y0 <= this.localMapSize)
-                setPixel(buffer, x, y0);
+            for (int y = -radius; y <= radius; y++)
+                for (int x = -radius; x <= radius; x++)
+                    if (x * x + y * y <= radius * radius &&
+                        centerX + x < localMapSize && centerX + x >= 0 &&
+                        centerY + y < localMapSize && centerY + y >=0)
+                        image[centerX + x, centerY + y] = true;
         }
 
         private void TryUnstuck(Move move, Wizard self, Game game, World world)
@@ -221,61 +218,147 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             if(localGoal.GetDistanceTo(self) < 1)
                 return; //not stuck, just need reached
 
+            #region MapInitialization
             bool[,] matrix = new bool[this.localMapSize, localMapSize];
-            foreach (var units in world.Minions.Where(a => a.GetDistanceTo(self) < this.localMapWizardPosition))
+
+
+            if(self.X + self.Radius < localMapSize/2)
+            for (int i = 0; i < localMapSize / 2 - self.X + self.Radius; i++)
+            {
+                for (int j = 0; j < localMapSize; j++)
+                {
+                    matrix[i, j] = true;
+                }
+            }
+
+            if (self.X + self.Radius > world.Width - localMapSize / 2)
+                for (int i = localMapSize / 2 - ((int)self.X + (int)self.Radius - (int)(world.Width)); i < localMapSize; i++)
+                {
+                    for (int j = 0; j < localMapSize; j++)
+                    {
+                        matrix[i, j] = true;
+                    }
+                }
+
+            if (self.Y + self.Radius > world.Height - localMapSize / 2)
+                for (int i = 0; i < localMapSize;i++)
+                {
+                    for (int j = localMapSize / 2 - ((int)self.Y + (int)self.Radius - (int)world.Height); j < localMapSize; j++)
+                    {
+                        matrix[i, j] = true;
+                    }
+                }
+
+            if (self.Y + self.Radius < localMapSize / 2)
+                for (int i = 0; i < localMapSize; i++)
+                {
+                    for (int j = 0; j < localMapSize / 2 - self.Y + self.Radius; j++)
+                    {
+                        matrix[i, j] = true;
+                    }
+                }
+
+            #endregion MapInitialization
+            
+            foreach (var units in world.Minions.Where(a => a.GetDistanceTo(self) < this.localMapCentre))
             {
                 PutUnitsOnMap(units, self, matrix);
             }
-            foreach (var units in world.Buildings.Where(a => a.GetDistanceTo(self) < this.localMapWizardPosition))
+            foreach (var units in world.Buildings.Where(a => a.GetDistanceTo(self) < this.localMapCentre))
             {
                 PutUnitsOnMap(units, self, matrix);
             }
-            foreach (var units in world.Wizards.Where(a => a.GetDistanceTo(self) < this.localMapWizardPosition))
+            foreach (var units in world.Wizards.Where(a => a.GetDistanceTo(self) < this.localMapCentre))
             {
+                if(units.IsMe)
+                    continue;
+
                 PutUnitsOnMap(units, self, matrix);
             }
-            foreach (var units in world.Trees.Where(a => a.GetDistanceTo(self) < this.localMapWizardPosition))
+            foreach (var units in world.Trees.Where(a => a.GetDistanceTo(self) < this.localMapCentre))
             {
                 PutUnitsOnMap(units, self, matrix);
+                move.CastAngle = self.GetAngleTo(units);
+                move.Action = ActionType.MagicMissile;
             }
 
             var grid = new StaticGrid(this.localMapSize, localMapSize, matrix);
-            var unstuckGoal = new GridPos((int)(localMapWizardPosition + localGoal.X - self.X), (int)(localMapWizardPosition + localGoal.X - self.X));
+            var unstuckGoal = new GridPos((int)(localMapCentre + localGoal.X - self.X), (int)(localMapCentre + localGoal.X - self.X));
             if (unstuckGoal.x > this.localMapSize - 1) unstuckGoal.x = this.localMapSize - 1;
             if (unstuckGoal.x < 0) unstuckGoal.x = 0;
             if (unstuckGoal.y > this.localMapSize - 1) unstuckGoal.y = this.localMapSize - 1;
             if (unstuckGoal.y < 0) unstuckGoal.y = 0;
-            var path = JumpPointFinder.FindPath(new JumpPointParam(grid, new GridPos((int) this.localMapWizardPosition, (int) this.localMapWizardPosition), unstuckGoal));
-            this.unstuckQueue = new Queue<Point2D>(path.Skip(1).Select(a => new Point2D(a.x - localMapWizardPosition + self.X, a.y - localMapWizardPosition + self.Y)));
 
-            var nextPoint = unstuckQueue.Count > 0 ? unstuckQueue.Dequeue() : localGoal;
+            var unstuckGoals = new List<GridPos>() {unstuckGoal, new GridPos(0, localMapSize-1)};
+            var beginPosition = GetClosestFreePosition(matrix, new GridPos(localMapCentre, localMapCentre));
+            foreach (var gridPose in unstuckGoals)
+            {
+                var endPosition = GetClosestFreePosition(matrix, gridPose);
 
-            Console.WriteLine($"Stuck on {self.X}, {self.Y}, going to {nextPoint.X}, {nextPoint.Y}, iterations { path.Count}");
+                if (beginPosition != GridPos.Empty && endPosition != GridPos.Empty)
+                {
+                    var path = JumpPointFinder.FindPath(new JumpPointParam(grid, beginPosition, endPosition));
 
-            GoForward(self, game, move, nextPoint);
+                    if (path.Count > 1)
+                    {
+                        this.unstuckQueue =
+                            new Queue<Point2D>(
+                                path.Skip(1)
+                                    .Select(
+                                        a =>
+                                            new Point2D(a.x - (beginPosition.x - self.X),
+                                                a.y - (beginPosition.y - self.Y))));
+                        var nextPoint = unstuckQueue.Count > 0 ? unstuckQueue.Peek() : localGoal;
+
+                        Console.WriteLine(
+                            $"Stuck on {self.X}, {self.Y}, going to {nextPoint.X}, {nextPoint.Y}, iterations {path.Count}");
+
+                        GoTo(self, game, move, nextPoint);
+                        return;
+                    }
+
+                    DebugHelper.VisualizeMatrix(matrix, localMapSize, localMapSize, path);
+                }
+            }
+
+
+            move.StrafeSpeed = game.WizardStrafeSpeed;
+            move.Speed = -game.WizardBackwardSpeed;
         }
+
+        private GridPos GetClosestFreePosition(bool[,] matrix, GridPos desiredPos)
+        {
+            for (int distance = 0; distance < localMapCentre; distance++)
+                for (int i = -distance; i <= distance; i ++)
+                    for (int j = -distance; j <= distance; j++)
+                    {
+                        if(localMapSize <= desiredPos.x + i || desiredPos.x + i < 0 ||
+                           localMapSize <= desiredPos.y + j || desiredPos.y + j < 0)
+                            continue;
+                        if (!matrix[desiredPos.x + i, desiredPos.y + j])
+                            return new GridPos((int)desiredPos.x + i, (int)desiredPos.y + j);
+                    }
+
+            return GridPos.Empty;
+        }
+
         private State GetMagicanState(Wizard self, World world, Game game)
         {
             State state = 0;
             if(this.enemiesInRange.Any())
                 state |= State.EnemiesInSight;
 
-            if(this.lastWizardStates.Any(a => a.Life > self.Life))
+            if(this.lastWizardGameStates.Any(a => a.Life > self.Life))
                 state |= State.Attacked;
 
             if ((double) self.MaxLife/self.Life < 0.5 && state.HasFlag(State.Attacked))
                 state |= State.Retreed;
 
-            if (world.TickCount > 0 && world.TickCount < game.TickCount - game.BonusAppearanceIntervalTicks)
+            if (self.X*self.Y/2 >= 2000*2000/2)
             {
-                if(world.TickCount == game.BonusAppearanceIntervalTicks)
-                    state |= State.MovingToBonus;
+                state |= State.MovingToBonus;
             }
-            if (this.unstuckQueue.Any())
-            {
-                state |= State.Unstucking;
-            }
-            if (this.globalGoal != null && this.globalGoal.GetDistanceTo(self) > 1 && lastWizardStates.Count > 0 && this.lastWizardStates.Peek().GetDistanceTo(self) < 1)
+            if (lastWizardGameStates.Count >= 5 && lastWizardGameStates.Max(a => a.GetDistanceTo(self)) < 1)
             {
                  state |= State.Stuck;
             }
@@ -284,10 +367,13 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
                  state |= State.Moving;
             }
 
-            if (world.Minions.Where(a => a.GetDistanceTo(self) <= game.WizardVisionRange * 2 && a.Faction == self.Faction).All(a => a.X * (game.MapSize - a.Y) / 2 <= self.X * (game.MapSize - self.Y) / 2))
+            if (enemiesInRange.Any(a => self.GetDistanceTo(a) <= game.GuardianTowerVisionRange + 10) &&
+                world.Buildings.Where(a => a.GetDistanceTo(self) <= game.WizardVisionRange * 2 && a.Faction == self.Faction).All(a => a.X * (game.MapSize - a.Y) / 2 <= self.X * (game.MapSize - self.Y) / 2) &&
+                world.Minions.Where(a => a.GetDistanceTo(self) <= game.WizardVisionRange * 2 && a.Faction == self.Faction).All(a => a.X * (game.MapSize - a.Y) / 2 <= self.X * (game.MapSize - self.Y) / 2))
             {
                 state |= State.WaitingForCreeps;
             }
+
             return state;
         }
 
@@ -336,79 +422,6 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             blockers = aliases;
         }
 
-        private void ChooseTarget(Wizard self, World world, Game game, Move move)
-        {
-            if (this.blockers.Count != 0 && this.blockers.All(a => a.X*(game.MapSize - a.Y)/2 <= self.X*(game.MapSize - self.Y)/2))
-            {
-                var point = GetPreviousWaypoint(self);
-                move.Turn = self.GetAngleTo(point.X, point.Y);
-                move.Speed = game.WizardBackwardSpeed;
-                return;
-            }
-            if (!enemiesInRange.Any())
-            {
-                if (this.lastWizardStates.Count > 0)
-                {
-                    var lastState = this.lastWizardStates.Peek();
-                    if (lastState.GetDistanceTo(self) < 1)
-                    {
-                        var stuckIterations = this.lastWizardStates.Count(a => self.GetDistanceTo(a) < 1);
-
-                        if (stuckIterations == 10)
-                        {
-                            this.lastWizardStates.Clear();
-                        }
-                        else if (stuckIterations == 7)
-                        {
-                            move.Speed = -game.WizardForwardSpeed;
-                        }
-                        else
-                        {
-                            move.StrafeSpeed = stuckIterations < 3 ? game.WizardStrafeSpeed : -game.WizardStrafeSpeed;
-                        }
-
-                        return;
-                    }
-                }
-
-                move.Speed = game.WizardForwardSpeed;
-
-                var point = GetNextwayPointInGraph(self, GetNextWaypoint(self));
-                move.Turn = self.GetAngleTo(point.X, point.Y);
-                return;
-            }
-            else
-            {
-//                if (this.lastWizardStates.Any(a => a.Life > self.Life))
-//                {
-//                    Console.WriteLine("FALLBACK!");
-//                    var point = GetPreviousWaypoint(self);
-//                    move.Turn = self.GetAngleTo(point.X, point.Y);
-//                    move.Speed = game.WizardBackwardSpeed;
-//                    return;
-//                }
-
-                var enemyUnit = GetUnitForAttack(self, game);
-                if (enemyUnit != null)
-                {
-                    //Console.WriteLine($"Attacking unit distanse = {self.GetDistanceTo(enemyUnit)}, angle = {self.GetAngleTo(enemyUnit)}, x = {enemyUnit.X}, y = {enemyUnit.Y}");
-                    move.Turn = self.GetAngleTo(enemyUnit);
-                    move.Speed = enemiesInRange.Min(a => a.GetDistanceTo(self)) <= self.CastRange /2 ? -game.WizardBackwardSpeed : 0;
-                    move.CastAngle = move.Turn;
-                    move.Action = GetWeapon();
-                }
-                else
-                {
-                    //enemyUnit = enemiesInRange.FirstOrDefault();
-                    //move.CastAngle = self.GetAngleTo(enemyUnit);
-                    //move.Action = GetWeapon();
-                    var point = GetNextwayPointInGraph(self, GetNextWaypoint(self));
-                    move.Turn = self.GetAngleTo(point.X, point.Y);
-                    move.Speed = game.WizardBackwardSpeed;
-                }
-            }
-        }
-
         private LivingUnit GetUnitForAttack(Wizard self, Game game)
         {
             LivingUnit nearest = null;
@@ -426,7 +439,7 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
 
                     Console.WriteLine(height);
 
-                    return height <= a.Radius + game.MagicMissileRadius;
+                    return height > a.Radius + game.MagicMissileRadius;
                     
                 });
 
@@ -450,7 +463,7 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
 
             initialized = true;
             localMapSize = (int)game.WizardVisionRange;
-            localMapWizardPosition = game.WizardVisionRange / 2;
+            localMapCentre = localMapSize / 2;
             random = new Random(unchecked((int)game.RandomSeed));
 
             double mapSize = game.MapSize;
@@ -464,28 +477,28 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
                 new Point2D(200, 200), // 4
                 new Point2D(600, 3800),// 5
                 new Point2D(600, 3200), // 6
-                new Point2D(600, 600),
-                new Point2D(600, 200),
-                new Point2D(1200, 2800),
-                new Point2D(1200, 1200),
-                new Point2D(1800, 2200),
-                new Point2D(1800, 1800),
-                new Point2D(2000, 3800),
-                new Point2D(2000, 2000),
-                new Point2D(2000, 200),
-                new Point2D(2200, 2200),
-                new Point2D(2200, 1800),
-                new Point2D(2800, 2800),
-                new Point2D(2800, 1200),
-                new Point2D(3200, 3800),
-                new Point2D(3200, 3200),
-                new Point2D(3200, 600),
-                new Point2D(3200, 200),
-                new Point2D(3800, 3800),
-                new Point2D(3800, 3200),
-                new Point2D(3800, 2000),
-                new Point2D(3800, 600),
-                new Point2D(3800, 200),
+                new Point2D(600, 600),// 7
+                new Point2D(600, 200),//8
+                new Point2D(1200, 2800),//9
+                new Point2D(1200, 1200),//10
+                new Point2D(1800, 2200),//11
+                new Point2D(1800, 1800),//12
+                new Point2D(2000, 3800),//13
+                new Point2D(2000, 2000),//14
+                new Point2D(2000, 200),//15
+                new Point2D(2200, 2200),//16
+                new Point2D(2200, 1800),//17
+                new Point2D(2800, 2800),//18
+                new Point2D(2800, 1200),//19
+                new Point2D(3200, 3800),//20
+                new Point2D(3200, 3200),//21
+                new Point2D(3200, 600),//22
+                new Point2D(3200, 200),//23
+                new Point2D(3800, 3800),//24
+                new Point2D(3800, 3200),//25
+                new Point2D(3800, 2000),//26
+                new Point2D(3800, 600),//27
+                new Point2D(3800, 200),//28
             };
 
             this.roadMap = new double[this.globalWaypoints.Count, this.globalWaypoints.Count];
@@ -511,7 +524,7 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             this.roadMap[7, 10] = this.roadMap[10, 7] = this.globalWaypoints[7].GetDistanceTo(this.globalWaypoints[10]);
             //8
             this.roadMap[8, 8] = this.roadMap[8, 7] = this.globalWaypoints[7].GetDistanceTo(this.globalWaypoints[8]);
-            this.roadMap[7, 10] = this.roadMap[10, 7] = this.globalWaypoints[7].GetDistanceTo(this.globalWaypoints[10]);
+            this.roadMap[8, 15] = this.roadMap[15, 8] = this.globalWaypoints[8].GetDistanceTo(this.globalWaypoints[15]);
             //9
             this.roadMap[9, 11] = this.roadMap[11, 9] = this.globalWaypoints[9].GetDistanceTo(this.globalWaypoints[11]);
             //10
@@ -549,24 +562,33 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
             this.roadMap[25, 26] = this.roadMap[26, 25] = this.globalWaypoints[25].GetDistanceTo(this.globalWaypoints[26]);
             //26
             this.roadMap[26, 27] = this.roadMap[27, 26] = this.globalWaypoints[26].GetDistanceTo(this.globalWaypoints[27]);
+            //26
+            this.roadMap[27, 28] = this.roadMap[28, 27] = this.globalWaypoints[27].GetDistanceTo(this.globalWaypoints[28]);
+            for (int i = 0; i < globalWaypoints.Count; i++)
+            for (int j = 0; j < globalWaypoints.Count; j++)
+            {
+                if (roadMap[i, j] == 0)
+                    roadMap[i, j] = double.MaxValue;
+            }
 
-            waypointsByLane.Add(LaneType.Middle, new Point2D[]{
-                   // new Point2D(100.0D, mapSize - 100.0D),
-                   // new Point2D(600.0D, mapSize - 200.0D),
-                    globalWaypoints[6],
-                    globalWaypoints[9],
-                    //globalWaypoints[16],
-                    //globalWaypoints[17],
-                    globalWaypoints[19],
-                    globalWaypoints[22],
-        });
+            targetToPoint = new Dictionary<Goals, Point2D>()
+            {
+                {Goals.Heal, globalWaypoints[1]},
+                {Goals.TakeTopBonus, new Point2D(1200,1200) },
+                {Goals.TakeBottomBonus, new Point2D(2800, 2800) },
+                {Goals.PushBottom, new Point2D(3900,1200) },
+                {Goals.PushMid, new Point2D(3200,1000) },
+                {Goals.PushTop, new Point2D(2800,300) },
+                {Goals.PushBase, new Point2D(3600,400) }
+            };
+
         }
 
         private Queue<Point2D> CalculatePathToTarget(Wizard self, Point2D target)
         {
             int closestIndexToSelf = 0;
             int closestIntexToTarget = 0;
-            var queue = new Queue<Point2D>();
+            var queue = new List<Point2D>();
 
             for(int i = 1; i < this.globalWaypoints.Count; i++)
             {
@@ -581,36 +603,49 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
                 }
             }
 
-            var points = new List<Point>();
-            for (int i = 0; i < this.globalWaypoints.Count; i++)
+            if(closestIndexToSelf == closestIntexToTarget)
+                return new Queue<Point2D>(new Point2D[] {target});
+
+
+            var dejkstra = new Dijkstra(roadMap, closestIndexToSelf);
+
+            int dest = dejkstra.Parents[closestIntexToTarget];
+
+            queue.Add(globalWaypoints[closestIntexToTarget]);
+            queue.Add(globalWaypoints[dest]);
+            var from = closestIndexToSelf;
+            while (dest != from)
             {
-                points.Add(new Point(i, false));
-            }
+                dest = dejkstra.Parents[dest];
 
-            var rebra = new List<Rebro>();
-            for (int i = 0; i < this.globalWaypoints.Count; i++)
-                for (int j = 0; j < this.globalWaypoints.Count; j++)
+                if (dest == from)
                 {
-                    if (this.roadMap[i, j] != 0)
-                        rebra.Add(new Rebro(new Point(i, false, i), new Point(j, false, j), (float)this.roadMap[i, j]));
+                    queue.Add(globalWaypoints[dest]);
                 }
+                else
+                {
+                    queue.Add(globalWaypoints[dest]);
+                }
+            }
+            queue.Reverse();
 
-            var calculator = new DekstraAlgorim(points.ToArray(), rebra.ToArray());
-            calculator.AlgoritmRun(new Point(closestIndexToSelf, false));
-            var minPath = calculator.MinPath1(new Point(closestIntexToTarget, false));
-            queue.Enqueue(globalWaypoints[closestIndexToSelf]);
-            minPath.ForEach(a => queue.Enqueue(this.globalWaypoints[a.Name]));
-            queue.Enqueue(globalWaypoints[closestIntexToTarget]);
+            if (queue.Count == 0 || queue.Last().GetDistanceTo(target) > 1)
+                queue.Add(target);
 
-            return queue;
+            return new Queue<Point2D>(queue);
         }
 
-        private Point2D GetNextwayPointInGraph(Wizard self, Point2D target)
+        private Point2D GetNextwayPoint(Wizard self)
         {
-            if (target != this.globalGoal)
+            if (unstuckQueue.Count > 0 && unstuckQueue.Peek().GetDistanceTo(self) <= WAYPOINT_RADIUS)
             {
-                this.pathToGoal = CalculatePathToTarget(self, target);
-                this.globalGoal = target;
+                unstuckQueue.Dequeue();
+            }
+
+            var targetPoint = targetToPoint[globalGoal];
+            if (pathToGoal == null || pathToGoal.Count == 0 || pathToGoal.Last().GetDistanceTo(targetPoint) > 1)
+            {
+                this.pathToGoal = CalculatePathToTarget(self, targetPoint);
             }
 
             if (this.pathToGoal.Count > 1 && this.pathToGoal.Peek().GetDistanceTo(self) <= WAYPOINT_RADIUS)
@@ -618,55 +653,55 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
                 this.pathToGoal.Dequeue();
             }
 
-            return this.pathToGoal.Peek();
+            return unstuckQueue.Any() ? unstuckQueue.Peek() : this.pathToGoal.Peek();
         }
 
-        private Point2D GetNextWaypoint(Wizard self)
-        {
-            var waypoints = this.waypointsByLane[LaneType.Middle];
-            int lastWaypointIndex = waypoints.Length - 1;
-            Point2D lastWaypoint = waypoints[lastWaypointIndex];
-
-            for (int waypointIndex = 0; waypointIndex < lastWaypointIndex; ++waypointIndex)
-            {
-                Point2D waypoint = waypoints[waypointIndex];
-
-                if (waypoint.GetDistanceTo(self) <= WAYPOINT_RADIUS)
-                {
-                    return waypoints[waypointIndex + 1];
-                }
-
-                if (lastWaypoint.GetDistanceTo(waypoint) < lastWaypoint.GetDistanceTo(self))
-                {
-                    return waypoint;
-                }
-            }
-
-            return lastWaypoint;
-        }
-
-        private Point2D GetPreviousWaypoint(Wizard self)
-        {
-            var waypoints = this.waypointsByLane[LaneType.Middle];
-            Point2D firstWaypoint = waypoints[0];
-
-            for (int waypointIndex = waypoints.Length - 1; waypointIndex > 0; --waypointIndex)
-            {
-                Point2D waypoint = waypoints[waypointIndex];
-
-                if (waypoint.GetDistanceTo(self) <= WAYPOINT_RADIUS)
-                {
-                    return waypoints[waypointIndex - 1];
-                }
-
-                if (firstWaypoint.GetDistanceTo(waypoint) < firstWaypoint.GetDistanceTo(self))
-                {
-                    return waypoint;
-                }
-            }
-
-            return firstWaypoint;
-        }
+//        private Point2D GetNextWaypoint(Wizard self)
+//        {
+//            var waypoints = this.waypointsByLane[LaneType.Middle];
+//            int lastWaypointIndex = waypoints.Length - 1;
+//            Point2D lastWaypoint = waypoints[lastWaypointIndex];
+//
+//            for (int waypointIndex = 0; waypointIndex < lastWaypointIndex; ++waypointIndex)
+//            {
+//                Point2D waypoint = waypoints[waypointIndex];
+//
+//                if (waypoint.GetDistanceTo(self) <= WAYPOINT_RADIUS)
+//                {
+//                    return waypoints[waypointIndex + 1];
+//                }
+//
+//                if (lastWaypoint.GetDistanceTo(waypoint) < lastWaypoint.GetDistanceTo(self))
+//                {
+//                    return waypoint;
+//                }
+//            }
+//
+//            return lastWaypoint;
+//        }
+//
+//        private Point2D GetPreviousWaypoint(Wizard self)
+//        {
+//            var waypoints = this.waypointsByLane[LaneType.Middle];
+//            Point2D firstWaypoint = waypoints[0];
+//
+//            for (int waypointIndex = waypoints.Length - 1; waypointIndex > 0; --waypointIndex)
+//            {
+//                Point2D waypoint = waypoints[waypointIndex];
+//
+//                if (waypoint.GetDistanceTo(self) <= WAYPOINT_RADIUS)
+//                {
+//                    return waypoints[waypointIndex - 1];
+//                }
+//
+//                if (firstWaypoint.GetDistanceTo(waypoint) < firstWaypoint.GetDistanceTo(self))
+//                {
+//                    return waypoint;
+//                }
+//            }
+//
+//            return firstWaypoint;
+//        }
 
         private class Point2D
         {
@@ -700,217 +735,127 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
 
     #region Deikstra
 
-    class Rebro
+    class Dijkstra
     {
-        public Point FirstPoint { get; private set; }
-        public Point SecondPoint { get; private set; }
-        public float Weight { get; private set; }
+        /// <summary>
+        /// Дистанции из А в различные направления
+        /// </summary>
+        internal double[] Distances { get; private set; }
 
-        public Rebro(Point first, Point second, float valueOfWeight)
+        /// <summary>
+        /// Массив родителей. По данному массиву можно проследить напарвление - от какой точки к какой 
+        /// переходит путь.
+        /// </summary>
+        internal int[] Parents { get; private set; }
+
+        private List<int> queue = new List<int>();
+
+        /// <summary>
+        /// Инициалищзация оценок кратчайших путей и предшественников
+        /// </summary>
+        /// <param name="s">Стартовая точка</param>
+        /// <param name="len">Длина массива путей</param>
+        private void InitializeSingleSource(int s, int len)
         {
-            FirstPoint = first;
-            SecondPoint = second;
-            Weight = valueOfWeight;
-        }
+            Distances = new double[len];
+            Parents = new int[len];
 
-    }
-    class Point : IEquatable<Point>
-    {
-        public float ValueMetka { get; set; }
-        public int Name { get; private set; }
-        public bool IsChecked { get; set; }
-        public Point predPoint { get; set; }
-        public object SomeObj { get; set; }
-        public Point(int value, bool ischecked)
-        {
-            ValueMetka = value;
-            IsChecked = ischecked;
-            predPoint = new Point();
-        }
-        public Point(int value, bool ischecked, int name)
-        {
-            ValueMetka = value;
-            IsChecked = ischecked;
-            Name = name;
-            predPoint = new Point();
-        }
-        public Point()
-        {
-        }
+            for (int i = 0; i < len; i++)
+            {
+                Distances[i] = Double.PositiveInfinity;
+                Parents[i] = 0;
 
-        public static bool operator ==(Point a, Point b)
-        {
-            if (ReferenceEquals(a, b))
-                return true;
+                queue.Add(i);
+            }
 
-            if(!ReferenceEquals(a, null) && !ReferenceEquals(b, null))
-                return a.Equals(b);
-
-            return false;
-        }
-
-        public static bool operator !=(Point a, Point b)
-        {
-            return !(a == b);
-        }
-
-        public bool Equals(Point other)
-        {
-            if (ReferenceEquals(other, null))
-                return false;
-
-            return this.Name == other.Name;
-        }
-    }
-
-    class DekstraAlgorim
-    {
-
-        public Point[] points { get; private set; }
-        public Rebro[] rebra { get; private set; }
-        public Point BeginPoint { get; private set; }
-
-        public DekstraAlgorim(Point[] pointsOfgrath, Rebro[] rebraOfgrath)
-        {
-            points = pointsOfgrath;
-            rebra = rebraOfgrath;
+            Distances[s] = 0;
+            Parents[s] = -1;
         }
 
         /// <summary>
-        /// Запуск алгоритма расчета
+        /// Извлечение минимальной вершины
         /// </summary>
-        /// <param name="beginp"></param>
-        public void AlgoritmRun(Point beginp)
+        /// <returns></returns>
+        private int ExtractMin()
         {
-            if (this.points.Count() == 0 || this.rebra.Count() == 0)
-            {
-                throw new Exception("Массив вершин или ребер не задан!");
-            }
-            else
-            {
-                BeginPoint = beginp;
-                OneStep(beginp);
-                foreach (Point point in points)
-                {
-                    Point anotherP = GetAnotherUncheckedPoint();
-                    if (anotherP != null)
-                    {
-                        OneStep(anotherP);
-                    }
-                    else
-                    {
-                        break;
-                    }
+            double min = Double.PositiveInfinity;
+            int Vertex = -1;
 
+            foreach (int j in queue)
+            {
+                if (Distances[j] <= min)
+                {
+                    min = Distances[j];
+                    Vertex = j;
                 }
             }
 
+            queue.Remove(Vertex);
+
+            return Vertex;
+
         }
 
         /// <summary>
-        /// Метод, делающий один шаг алгоритма. Принимает на вход вершину
+        /// Takes a graph as input an adjacency matrix (see top for details) and a starting node
         /// </summary>
-        /// <param name="beginpoint"></param>
-        public void OneStep(Point beginpoint)
+        /// <param name="G"></param>
+        /// <param name="s"></param>
+        internal Dijkstra(double[,] G, int s)
         {
-            foreach (Point nextp in Pred(beginpoint))
+            /* Check graph format and that the graph actually contains something */
+            if (G.GetLength(0) < 1 || G.GetLength(0) != G.GetLength(1))
             {
-                if (nextp.IsChecked == false) //не отмечена
-                {
-                    float newmetka = beginpoint.ValueMetka + GetMyRebro(nextp, beginpoint).Weight;
-                    if (nextp.ValueMetka > newmetka)
-                    {
-                        nextp.ValueMetka = newmetka;
-                        nextp.predPoint = beginpoint;
-                    }
-                    else
-                    {
+                throw new ArgumentException("Graph error, wrong format or no nodes to compute");
+            }
 
+            int len = G.GetLength(0);
+
+            InitializeSingleSource(s, len);
+
+            while (queue.Count > 0)
+            {
+                int u = ExtractMin();
+
+                /* Find the nodes that u connects to and perform relax */
+                for (int v = 0; v < len; v++)
+                {
+                    /* Checks for edges with negative weight */
+                    if (G[u, v] < 0)
+                    {
+                        throw new ArgumentException("Graph contains negative edge(s)");
+                    }
+
+                    /* Check for an edge between u and v */
+                    if (G[u, v] > 0)
+                    {
+                        Relax(u, v, G);
                     }
                 }
             }
-            beginpoint.IsChecked = true; //вычеркиваем
         }
 
         /// <summary>
-        /// Поиск соседей для вершины. Для неориентированного графа ищутся все соседи.
+        /// Ослабление ребра (u, v)
         /// </summary>
-        /// <param name="currpoint"></param>
-        /// <returns></returns>
-        private IEnumerable<Point> Pred(Point currpoint)
+        /// <param name="u"></param>
+        /// <param name="v"></param>
+        /// <param name="G"></param>
+        void Relax(int u, int v, double[,] G)
         {
-            IEnumerable<Point> firstpoints = from ff in rebra where ff.FirstPoint == currpoint select ff.SecondPoint;
-            IEnumerable<Point> secondpoints = from sp in rebra where sp.SecondPoint == currpoint select sp.FirstPoint;
-            IEnumerable<Point> totalpoints = firstpoints.Concat<Point>(secondpoints);
-            return totalpoints;
-        }
-
-        /// <summary>
-        /// Получаем ребро, соединяющее 2 входные точки
-        /// </summary>
-        /// <param name="a"></param>
-        /// <param name="b"></param>
-        /// <returns></returns>
-        private Rebro GetMyRebro(Point a, Point b)
-        {
-            //ищем ребро по 2 точкам
-            IEnumerable<Rebro> myr = from reb in rebra where (reb.FirstPoint == a & reb.SecondPoint == b) || (reb.SecondPoint == a & reb.FirstPoint == b) select reb;
-            if (myr.Any())
+            /* Edge exists, relax the edge */
+            if (Distances[v] > Distances[u] + G[u, v])
             {
-                return myr.First();
+                Distances[v] = Distances[u] + G[u, v];
+                Parents[v] = u;
             }
-            else
-            {
-                throw new Exception("Не найдено ребро между соседями!");
-            }
-        }
-
-        /// <summary>
-        /// Получаем очередную неотмеченную вершину, "ближайшую" к заданной.
-        /// </summary>
-        /// <returns></returns>
-        private Point GetAnotherUncheckedPoint()
-        {
-            IEnumerable<Point> pointsuncheck = from p in points where p.IsChecked == false select p;
-            if (pointsuncheck.Count() != 0)
-            {
-                float minVal = pointsuncheck.First().ValueMetka;
-                Point minPoint = pointsuncheck.First();
-                foreach (Point p in pointsuncheck)
-                {
-                    if (p.ValueMetka < minVal)
-                    {
-                        minVal = p.ValueMetka;
-                        minPoint = p;
-                    }
-                }
-                return minPoint;
-            }
-            else
-            {
-                return null;
-            }
-        }
-
-        public List<Point> MinPath1(Point end)
-        {
-            List<Point> listOfpoints = new List<Point>();
-            Point tempp = new Point();
-            tempp = end;
-            while (tempp != this.BeginPoint)
-            {
-                listOfpoints.Add(tempp);
-                tempp = tempp.predPoint;
-            }
-
-            return listOfpoints;
         }
     }
 
     #endregion Deikstra
-        #region PathFinder
-        //THANKS TO https://github.com/juhgiyo/EpPathFinding.cs
-        public delegate float HeuristicDelegate(int iDx, int iDy);
+    #region PathFinder
+    //THANKS TO https://github.com/juhgiyo/EpPathFinding.cs
+    public delegate float HeuristicDelegate(int iDx, int iDy);
     public class JumpPointParam
     {
 
@@ -2526,6 +2471,7 @@ namespace Com.CodeGame.CodeWizards2016.DevKit.CSharpCgdk {
     }
     public struct GridPos
     {
+        public static GridPos Empty = new GridPos(-1,-1);
         public int x;
         public int y;
         public GridPos(int iX, int iY)
